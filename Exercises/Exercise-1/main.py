@@ -1,9 +1,8 @@
-import requests
+import aiohttp
+import asyncio
 import os
 import zipfile
 import shutil
-from urllib.request import urlretrieve
-
 
 download_uris = [
     "https://divvy-tripdata.s3.amazonaws.com/Divvy_Trips_2018_Q4.zip",
@@ -16,65 +15,85 @@ download_uris = [
 ]
 
 
-def check_url_validity(url):
-    """Check if the URL is valid by sending a Head request."""
+async def check_url_validity(session, url):
+    """Check if the URL is valid by sending a Head request asynchronously."""
     try:
-        response = requests.head(url, allow_redirects=True)
-        if response.status_code == 200:
-            return True
-        else:
-            str_log = f"URL not valid: {url} (Status Code: {response.status_code})"
-            with open("log_file.txt", "a") as f:
-                f.write(str_log + "\n")
-            print(str_log)
-            return False
+        async with session.head(url) as response:
+            if response.status == 200:
+                return True
+            else:
+                str_log = f"URL not valid: {url} (Status Code: {response.status})"
+                with open("log_file.txt", "a") as f:
+                    f.write(str_log + "\n")
+                print(str_log)
+                return False
     except Exception as e:
         print(f"Error checking URL: {url} - {e}")
         return False
 
 
-def download_and_unzip(url, file_name, download_dir):
-    """Download and unzip files from URLs"""
-    # Save zip file
-    urlretrieve(url, f"{download_dir}/{file_name}")
+async def download_and_unzip(session, url, file_name, download_dir):
+    """Download and unzip files asynchronously."""
+    zip_path = f"{download_dir}/{file_name}"
 
-    # unzip the file
-    with zipfile.ZipFile(f"{download_dir}/{file_name}", "r") as zip_ref:
+    # Download file asynchronously
+    async with session.get(url) as response:
+        with open(zip_path, "wb") as f:
+            while True:
+                chunk = await response.content.read(1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+    # Unzip the file
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
         zip_ref.extractall(download_dir)
 
     # Delete the zip file after the extraction
-    os.remove(f"{download_dir}/{file_name}")
+    os.remove(zip_path)
+
     # Remove the __MACOSX directory if it exists
     remove_macosx_dir(download_dir)
 
 
 def remove_macosx_dir(directory):
-    """Remove all __MACOSX directories and their contents recursively"""
+    """Remove all __MACOSX directories and their contents recursively."""
     for root, dirs, files in os.walk(directory):
         if "__MACOSX" in dirs:
             macosx_path = os.path.join(root, "__MACOSX")
-            print("Removing {macosx_path} directory...")
+            print(f"Removing {macosx_path} directory...")
             shutil.rmtree(macosx_path)
-            print("Removed {macosx_path}")
+            print(f"Removed {macosx_path}")
 
 
-def main():
+async def download_files():
+    """Main function to orchestrate the asynchronous downloads."""
     # Ensure the 'Downloads' directory exists
-    if not os.path.exists("Downloads"):
-        os.makedirs("Downloads")
-
     download_dir = "Downloads"
+    if not os.path.exists(download_dir):
+        os.makedirs(download_dir)
 
-    # List of files names
     list_files = [i.split("/")[-1] for i in download_uris]
 
-    # Download data files
-    for url, file_name in zip(download_uris, list_files):
-        if check_url_validity(url):
-            download_and_unzip(url, file_name, download_dir)
-        else:
-            print(f"Skipping download for {file_name} due invalid URL.")
+    # Create an aiohttp session for making HTTP requests
+    async with aiohttp.ClientSession() as session:
+        # List of async tasks to check URLs and download files
+        tasks = []
+
+        for url, file_name in zip(download_uris, list_files):
+            if await check_url_validity(session, url):
+                tasks.append(download_and_unzip(session, url, file_name, download_dir))
+            else:
+                print(f"Skipping download for {file_name} due to invalid URL.")
+
+        # Await all download tasks concurrently
+        await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
-    main()
+    # Use ProactorEventLoop for Windows
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    # Run the asyncio event loop
+    asyncio.run(download_files())
